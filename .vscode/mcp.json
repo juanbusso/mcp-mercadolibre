@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "mercadolibre": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${workspaceFolder}/build/main.js"]
+    }
+  }
+}
