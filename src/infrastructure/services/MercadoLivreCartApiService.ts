@@ -406,11 +406,49 @@ export class MercadoLivreCartApiService {
       let discountAmount = 0;
       let shippingCost = 0;
 
+      const parseTicketRow = (rowObj: any) => {
+        const vals: any[] = rowObj?.value?.values || [];
+        let isFree = false;
+        let isMeliPlus = Boolean(rowObj?.is_free_shipping_by_meli_plus);
+        let originalCost: number | undefined;
+        let currentCost: number | undefined;
+
+        for (const v of vals) {
+          if (v?.is_meli_plus) isMeliPlus = true;
+          if (v?.type === 'label') {
+            const lbl = String(v?.label?.text || '').toLowerCase();
+            if (lbl.includes('gratis') || lbl.includes('free')) {
+              isFree = true;
+              currentCost = 0;
+            }
+          } else if (v?.price && typeof v.price.value === 'number') {
+            if (
+              v.price.previous ||
+              v.key === 'original' ||
+              v.key === 'offer_price'
+            ) {
+              originalCost = v.price.value;
+            } else {
+              currentCost = v.price.value;
+            }
+          }
+        }
+        if (isFree) currentCost = 0;
+        return { currentCost, originalCost, isFree, isMeliPlus };
+      };
+
       for (const row of ticketRows) {
-        const valObj = row.value?.values?.[0]?.price?.value ?? 0;
-        if (row.id === 'item') productsSubtotal = valObj;
-        else if (row.id === 'discount') discountAmount = Math.abs(valObj);
-        else if (row.id === 'shipping') shippingCost = valObj;
+        const parsed = parseTicketRow(row);
+        if (row.id === 'item') productsSubtotal = parsed.currentCost ?? 0;
+        else if (row.id === 'discount')
+          discountAmount = Math.abs(parsed.currentCost ?? 0);
+        else if (row.id === 'shipping') {
+          const labelFree = String(row.label?.text || '')
+            .toLowerCase()
+            .includes('gratis');
+          shippingCost =
+            parsed.isFree || labelFree ? 0 : (parsed.currentCost ?? 0);
+        }
       }
 
       const totalToPay =
@@ -458,8 +496,15 @@ export class MercadoLivreCartApiService {
         }
 
         const footerRow = g.footer?.ticket_row;
-        const groupShippingVal = footerRow?.value?.values?.[0]?.price?.value;
-        const groupShippingText = footerRow?.label?.text || '';
+        const parsedFooter = parseTicketRow(footerRow);
+        const groupShippingVal = parsedFooter.isFree
+          ? 0
+          : parsedFooter.currentCost;
+        const groupShippingText = parsedFooter.isFree
+          ? parsedFooter.isMeliPlus
+            ? 'Envío GRATIS (Meli+)'
+            : 'Envío GRATIS'
+          : footerRow?.label?.text || '';
 
         const groupCheckout = this.buildCheckoutUrl(items);
         groups.push({
