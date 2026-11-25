@@ -10,8 +10,11 @@ import type {
   RemoveFromCartInput,
   RemoveFromCartOutput,
 } from '../../domain/models/MercadoLivreCartModel.js';
+import type { MagoMaxwellService } from './MagoMaxwellService.js';
 
 export class MercadoLivreCartApiService {
+  constructor(private magoService?: MagoMaxwellService) {}
+
   private readonly CART_API_URL =
     'https://www.mercadolibre.com.ar/gz/cart/v3/api/add-to-cart';
 
@@ -81,14 +84,18 @@ export class MercadoLivreCartApiService {
       return parts.join('; ');
     }
 
-    // Check config file ~/.config/mcp-mercadolibre/session.json
+    // Check config file ~/.config/mcp-mercadolibre/session.json (strictly prefer personal account)
     try {
       if (fs.existsSync(this.DEFAULT_SESSION_PATH)) {
         const raw = fs.readFileSync(this.DEFAULT_SESSION_PATH, 'utf-8');
         const parsed = JSON.parse(raw);
+        const source =
+          parsed?.accounts?.personal && typeof parsed.accounts.personal === 'object'
+            ? parsed.accounts.personal
+            : parsed;
         const parts: string[] = [];
-        for (const [k, v] of Object.entries(parsed)) {
-          if (this.ALLOWED_COOKIES.has(k) && v) {
+        for (const [k, v] of Object.entries(source)) {
+          if (this.ALLOWED_COOKIES.has(k) && v && typeof v === 'string') {
             parts.push(`${k}=${v}`);
           }
         }
@@ -104,12 +111,40 @@ export class MercadoLivreCartApiService {
   }
 
   /**
-   * Normalizes an item ID or Mercado Libre URL into a canonical MLA ID
+   * Checks if input is a catalog (/p/MLA...) or user-product (/up/MLAU...) URL without explicit seller item_id
+   */
+  private isUnresolvedCatalogInput(input: string): boolean {
+    if (!input) return false;
+    const decoded = (() => {
+      try {
+        return decodeURIComponent(input);
+      } catch {
+        return input;
+      }
+    })();
+    if (/(?:item_id[:=]|wid=)MLA-?\d{6,}/i.test(decoded)) return false;
+    return /\/p\/MLA\d+|\/up\/MLAU\d+|^MLAU\d+$/i.test(decoded.trim());
+  }
+
+  /**
+   * Normalizes an item ID or Mercado Libre URL into a canonical MLA ID.
+   * Prioritizes explicit seller item_id/wid query params over catalog /p/MLA... IDs.
    */
   cleanItemId(input: string): string {
     if (!input) return '';
     const trimmed = input.trim();
-    const match = trimmed.match(/MLA[-]?(\d+)/i);
+    const decoded = (() => {
+      try {
+        return decodeURIComponent(trimmed);
+      } catch {
+        return trimmed;
+      }
+    })();
+    const explicit = decoded.match(/(?:item_id[:=]|wid=)MLA-?(\d{6,})/i);
+    if (explicit) {
+      return `MLA${explicit[1]}`;
+    }
+    const match = decoded.match(/MLA[-]?(\d+)/i);
     if (match) {
       return `MLA${match[1]}`;
     }
@@ -143,12 +178,22 @@ export class MercadoLivreCartApiService {
   }
 
   /**
-   * Sends the add-to-cart request to Mercado Libre's front API
+   * Sends the add-to-cart request to Mercado Libre's front API.
+   * Automatically resolves catalog (/p/MLA...) and user-product (/up/MLAU...) URLs via Mago when needed.
    */
   async addToCart(input: AddToCartInput): Promise<AddToCartOutput> {
     const rawId = input.itemId;
-    const cleanedItemId = this.cleanItemId(rawId);
     const quantity = input.quantity && input.quantity > 0 ? input.quantity : 1;
+    let cleanedItemId = this.cleanItemId(rawId);
+    let resolvedFrom: string | undefined;
+
+    if (this.isUnresolvedCatalogInput(rawId) && this.magoService) {
+      const resolved = await this.magoService.resolveCatalogToItemId(rawId);
+      if (resolved?.itemId) {
+        resolvedFrom = rawId;
+        cleanedItemId = resolved.itemId;
+      }
+    }
 
     if (!cleanedItemId) {
       return {
@@ -172,86 +217,135 @@ export class MercadoLivreCartApiService {
       };
     }
 
-    const headers: Record<string, string> = {
-      accept: 'application/json, text/plain, */*',
-      'content-type': 'application/json',
-      origin: 'https://www.mercadolibre.com.ar',
-      referer: 'https://www.mercadolibre.com.ar/',
-      'user-agent':
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36',
-      'x-requested-with': 'XMLHttpRequest',
-      Cookie: cookieHeader,
-    };
+    const attemptAdd = async (targetItemId: string): Promise<AddToCartOutput & { _needsResolve?: boolean }> => {
+      const headers: Record<string, string> = {
+        accept: 'application/json, text/plain, */*',
+        'content-type': 'application/json',
+        origin: 'https://www.mercadolibre.com.ar',
+        referer: 'https://www.mercadolibre.com.ar/',
+        'user-agent':
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36',
+        'x-requested-with': 'XMLHttpRequest',
+        Cookie: cookieHeader,
+      };
 
-    const payload = {
-      item_id: cleanedItemId,
-      quantity,
-    };
+      const payload: Record<string, unknown> = {
+        item_id: targetItemId,
+        quantity,
+      };
 
-    try {
-      const response = await fetch(this.CART_API_URL, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        let parsedError: any = null;
-        try {
-          parsedError = JSON.parse(errorText);
-        } catch {}
-
-        const msg =
-          parsedError?.message ||
-          parsedError?.error ||
-          `HTTP ${response.status}: ${response.statusText}`;
-
-        return {
-          success: false,
-          itemId: cleanedItemId,
-          quantity,
-          status: 'error',
-          message: `Error al agregar al carrito: ${msg}`,
-        };
+      const varMatch = rawId.match(/(?:searchVariation=|VAR)(\d+)/);
+      if (varMatch?.[1]) {
+        payload.variation_id = varMatch[1];
       }
 
-      const data: any = await response.json();
+      try {
+        const response = await fetch(this.CART_API_URL, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload),
+        });
 
-      const cartStatus = data.cart_status || {};
-      const tabbarInfo = data.tabbar_info || {};
-      const itemStatus = data.item_status || {};
+        if (!response.ok) {
+          const errorText = await response.text();
+          let parsedError: any = null;
+          try {
+            parsedError = JSON.parse(errorText);
+          } catch {}
 
-      const currentPrice = itemStatus.price?.current;
-      const originalPrice = itemStatus.price?.original;
+          const msg =
+            parsedError?.message ||
+            parsedError?.error ||
+            `HTTP ${response.status}: ${response.statusText}`;
 
-      return {
-        success: true,
-        itemId: cleanedItemId,
-        quantity,
-        totalCartQuantity: tabbarInfo.quantity,
-        itemPrice: currentPrice
-          ? {
-              current: currentPrice,
-              original: originalPrice,
-            }
-          : undefined,
-        cartStatus: {
-          status: cartStatus.status || 'enabled',
-          displayQuantity: cartStatus.display_quantity || quantity,
-        },
-        message: `Producto ${cleanedItemId} agregado exitosamente al carrito (${quantity} unidad${quantity > 1 ? 'es' : ''}). Total de artículos en carrito: ${tabbarInfo.quantity || 'N/A'}.`,
-      };
-    } catch (err: any) {
-      console.error('Error in addToCart:', err);
-      return {
-        success: false,
-        itemId: cleanedItemId,
-        quantity,
-        status: 'error',
-        message: `Error de red al conectar con Mercado Libre: ${err.message}`,
-      };
+          return {
+            success: false,
+            itemId: targetItemId,
+            resolvedFrom,
+            quantity,
+            status: 'error',
+            message: `Error al agregar al carrito: ${msg}`,
+            _needsResolve: response.status === 422 || response.status === 400,
+          };
+        }
+
+        const data: any = await response.json();
+
+        // Detect Mercado Libre HTTP 200 logical errors (e.g. CAR14 on catalog IDs)
+        const errMsg = data?.message;
+        if (
+          errMsg &&
+          (errMsg.criticality === 'error' || Boolean(errMsg.error_code))
+        ) {
+          return {
+            success: false,
+            itemId: targetItemId,
+            resolvedFrom,
+            quantity,
+            status: errMsg.error_code || 'error',
+            message: `Mercado Libre rechazó agregar ${targetItemId}: ${errMsg.label || errMsg.error_code} (${errMsg.error_code || 'error'}).`,
+            _needsResolve: errMsg.error_code === 'CAR14',
+          };
+        }
+
+        const cartStatus = data.cart_status || {};
+        const tabbarInfo = data.tabbar_info || {};
+        const itemStatus = data.item_status || {};
+
+        const currentPrice = itemStatus.price?.current;
+        const originalPrice = itemStatus.price?.original;
+
+        return {
+          success: true,
+          itemId: targetItemId,
+          resolvedFrom,
+          quantity,
+          totalCartQuantity: tabbarInfo.quantity,
+          itemPrice: currentPrice
+            ? {
+                current: currentPrice,
+                original: originalPrice,
+              }
+            : undefined,
+          cartStatus: {
+            status: cartStatus.status || 'enabled',
+            displayQuantity: cartStatus.display_quantity || quantity,
+          },
+          directCheckoutUrl: `https://www.mercadolibre.com.ar/gz/checkout/cart/buy?site_id=MLA&items=${targetItemId}-Q${quantity}`,
+          message: `Producto ${targetItemId} agregado exitosamente al carrito (${quantity} unidad${quantity > 1 ? 'es' : ''}). Total de artículos en carrito: ${tabbarInfo.quantity ?? 'N/A'}.`,
+        };
+      } catch (err: any) {
+        console.error('Error in addToCart:', err);
+        return {
+          success: false,
+          itemId: targetItemId,
+          resolvedFrom,
+          quantity,
+          status: 'error',
+          message: `Error de red al conectar con Mercado Libre: ${err.message}`,
+        };
+      }
+    };
+
+    const firstTry = await attemptAdd(cleanedItemId);
+    if (firstTry.success) {
+      const { _needsResolve: _, ...clean } = firstTry;
+      return clean;
     }
+
+    // If Mercado Libre returned CAR14 / 422 (likely a catalog ID) and we haven't resolved via Mago yet, try once
+    if (firstTry._needsResolve && !resolvedFrom && this.magoService) {
+      const resolved = await this.magoService.resolveCatalogToItemId(rawId);
+      if (resolved?.itemId && resolved.itemId !== cleanedItemId) {
+        resolvedFrom = rawId;
+        const secondTry = await attemptAdd(resolved.itemId);
+        const { _needsResolve: _, ...clean } = secondTry;
+        return clean;
+      }
+    }
+
+    const { _needsResolve: _, ...clean } = firstTry;
+    return clean;
   }
 
   /**

@@ -7,6 +7,7 @@ export interface AddToCartInput {
 export interface AddToCartOutput {
   success: boolean;
   itemId: string;
+  resolvedFrom?: string;
   quantity: number;
   totalCartQuantity?: number;
   itemPrice?: {
@@ -17,6 +18,7 @@ export interface AddToCartOutput {
     status: string;
     displayQuantity: number;
   };
+  directCheckoutUrl?: string;
   status?: string;
   message?: string;
 }

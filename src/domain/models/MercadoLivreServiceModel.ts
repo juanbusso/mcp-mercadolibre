@@ -11,12 +11,14 @@ export interface GetProductsInput {
 }
 
 export interface MercadoLivreCrawlerOutput {
+  itemId?: string;
   name: string;
   price: number;
   originalPrice?: number;
   discount?: string;
   queryMatchRatio: number;
   url: string;
+  directCheckoutUrl?: string;
   isFull: boolean;
   isInternational: boolean;
   internationalOrigin?: string;
@@ -27,5 +29,6 @@ export interface MercadoLivreCrawlerOutput {
     deliveryDays: number;
     originalDescription: string;
   }> | null;
+  source?: 'mago' | 'html';
 }
 

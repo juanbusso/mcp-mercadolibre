@@ -72,7 +72,7 @@ export class MercadoLivreToolsController {
   private registerAddToCartToolHandler(): void {
     const toolConfig = {
       description:
-        'Agregar un producto al carrito de compras de Mercado Libre Argentina (usando ID de publicación ej: MLA1234567890 o el link de la publicación)',
+        'Agregar un producto al carrito de compras de Mercado Libre Argentina (acepta ID MLA de publicación, URL clásica, o URLs de catálogo /p/MLA... y /up/MLAU... que se resuelven automáticamente vía Mago)',
       inputSchema: {
         itemId: z
           .string()

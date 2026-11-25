@@ -7,6 +7,7 @@ import type {
   MercadoLivreCrawlerOutput,
 } from '../../domain/models/MercadoLivreServiceModel.js';
 import { wordsMatching } from '../../domain/utils/crawler/words-matching.js';
+import type { MagoMaxwellService } from '../../infrastructure/services/MagoMaxwellService.js';
 import type { MercadoLivreApiService } from '../../infrastructure/services/MercadoLivreApiService.js';
 
 export class MercadoLivreService {
@@ -15,7 +16,10 @@ export class MercadoLivreService {
   products: MercadoLivreCrawlerOutput[] = [];
   page: number = 1;
 
-  constructor(private apiService: MercadoLivreApiService) {}
+  constructor(
+    private apiService: MercadoLivreApiService,
+    private magoService?: MagoMaxwellService,
+  ) {}
 
   async getProducts(input: string[] | GetProductsInput) {
     const products = Array.isArray(input) ? input : input.products;
@@ -28,6 +32,24 @@ export class MercadoLivreService {
     this.products = [];
 
     if (products && products.length > 0) {
+      // 1. Primary search engine: Mago / Maxwell (returns real prices, Full/local flags & concrete seller MLA item_ids)
+      if (this.magoService) {
+        const magoResults: MercadoLivreCrawlerOutput[] = [];
+        for (const term of products.slice(0, 3)) {
+          const found = await this.magoService.searchProducts(term, {
+            onlyFull,
+            excludeInternational,
+            limit: 8,
+          });
+          magoResults.push(...found);
+        }
+        if (magoResults.length > 0) {
+          this.products = magoResults;
+          return this.getLowestValueItem(onlyFull, excludeInternational);
+        }
+      }
+
+      // 2. Fallback: legacy HTML crawler
       await this.getItems(products[0], onlyFull);
     }
 
