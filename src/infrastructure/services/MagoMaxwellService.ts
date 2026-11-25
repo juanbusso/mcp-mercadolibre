@@ -260,7 +260,8 @@ export class MagoMaxwellService {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      let reply = '';
+      let currentReply = '';
+      const completedMessages: string[] = [];
       let resolvedConvId = conversationId;
       let done = false;
 
@@ -280,11 +281,15 @@ export class MagoMaxwellService {
             if (et === 'chat.execution.started' && evt?.data?.conversation_id) {
               resolvedConvId = String(evt.data.conversation_id);
             } else if (et === 'chat.message.delta') {
-              reply += String(evt?.data?.text_delta ?? '');
-            } else if (
-              (et === 'chat.message.done' || et === 'chat.execution.done') &&
-              reply.length > 0
-            ) {
+              currentReply += String(evt?.data?.text_delta ?? '');
+            } else if (et === 'chat.message.done') {
+              const trimmedMsg = currentReply.trim();
+              if (trimmedMsg) completedMessages.push(trimmedMsg);
+              currentReply = '';
+            } else if (et === 'chat.execution.done') {
+              const trimmedMsg = currentReply.trim();
+              if (trimmedMsg) completedMessages.push(trimmedMsg);
+              currentReply = '';
               done = true;
               await reader.cancel().catch(() => {});
               break;
@@ -295,7 +300,13 @@ export class MagoMaxwellService {
         }
       }
 
-      const finalReply = reply.trim();
+      if (currentReply.trim()) {
+        completedMessages.push(currentReply.trim());
+      }
+      const finalReply =
+        completedMessages.length > 0
+          ? completedMessages[completedMessages.length - 1]
+          : '';
       if (!finalReply) {
         return {
           success: false,
